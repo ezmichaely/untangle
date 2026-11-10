@@ -24,6 +24,8 @@ Before answering or editing:
 4. Multi-step implementation after an approved plan → **writing-plans** / **executing-plans** or **subagent-driven-development**.
 5. Before claiming done → **verification-before-completion**.
 
+After every code change, run both `pnpm test` and `pnpm typecheck` before reporting the work complete. If a failure leads to another code change, rerun both. Do not claim completion while either fails; if the environment blocks a command, report that limitation.
+
 Announce: `Using [skill] to [purpose]` and follow the skill.
 
 ## 3. Agent skills — pick the phase skill

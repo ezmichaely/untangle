@@ -4,7 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { openDb } from "./db.js";
 import { setRoots } from "./roots.js";
-import { approveAndMove, undoLastAction, listActions } from "./moves.js";
+import { approveAndMove, approveTopicGroup, undoLastAction, listActions } from "./moves.js";
 import { hashFile } from "./scan.js";
 
 const tmpDirs: string[] = [];
@@ -158,6 +158,56 @@ describe("approveAndMove", () => {
     const result = approveAndMove(db, proposalId);
     expect(result.afterPath).not.toBe(claimedPath);
     expect(fs.existsSync(result.afterPath)).toBe(true);
+    db.close();
+  });
+});
+
+describe("approveTopicGroup", () => {
+  it("moves included files together, skips checked files, and lets skip be undone", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "untangle-topic-"));
+    tmpDirs.push(root);
+    const messy = path.join(root, "Messy");
+    const untangle = path.join(root, "Untangle");
+    fs.mkdirSync(messy, { recursive: true });
+    const db = openDb(path.join(root, "t.db"));
+    setRoots(db, { messyPath: messy, untanglePath: untangle });
+
+    const proposals = ["a.pdf", "b.xlsx", "c.docx"].map((name) => {
+      const source = path.join(messy, name);
+      fs.writeFileSync(source, name);
+      const fileId = (
+        db.prepare(
+          `INSERT INTO files(path, size, mtime_ms, ext, queue_type, sha256, status)
+           VALUES(?, ?, 1, ?, 'other', ?, 'proposed') RETURNING id`,
+        ).get(source, name.length, path.extname(name), hashFile(source)) as { id: number }
+      ).id;
+      return (
+        db.prepare(
+          `INSERT INTO proposals(file_id, suggested_relpath, confidence, evidence_json)
+           VALUES(?, ?, 0.9, '{}') RETURNING id`,
+        ).get(fileId, `Finance/Reports/${name}`) as { id: number }
+      ).id;
+    });
+
+    const result = approveTopicGroup(
+      db,
+      "Finance/Reports",
+      proposals.slice(0, 2),
+      proposals.slice(2),
+      "Finance/Reports",
+    );
+    expect(result).toMatchObject({ moved: 2, skipped: 1, failed: [] });
+    expect(fs.existsSync(path.join(untangle, "Finance/Reports/a.pdf"))).toBe(true);
+    expect(fs.existsSync(path.join(untangle, "Finance/Reports/b.xlsx"))).toBe(true);
+    expect(fs.existsSync(path.join(messy, "c.docx"))).toBe(true);
+    expect(
+      (db.prepare(`SELECT status FROM files WHERE path = ?`).get(path.join(messy, "c.docx")) as { status: string }).status,
+    ).toBe("skipped");
+
+    undoLastAction(db);
+    expect(
+      (db.prepare(`SELECT status FROM files WHERE path = ?`).get(path.join(messy, "c.docx")) as { status: string }).status,
+    ).toBe("proposed");
     db.close();
   });
 });

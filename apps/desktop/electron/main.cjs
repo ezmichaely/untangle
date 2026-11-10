@@ -5,6 +5,7 @@ const fs = require("node:fs");
 
 /** @type {import('node:child_process').ChildProcessWithoutNullStreams | null} */
 let worker = null;
+let mainWindow = null;
 /** @type {Map<string, {resolve: Function, reject: Function}>} */
 const pending = new Map();
 let stdoutBuf = "";
@@ -46,7 +47,10 @@ function startWorker() {
       } catch {
         continue;
       }
-      if (msg.event) continue;
+      if (msg.event) {
+        mainWindow?.webContents.send("worker:event", msg.event);
+        continue;
+      }
       if (msg.id && pending.has(msg.id)) {
         const p = pending.get(msg.id);
         pending.delete(msg.id);
@@ -91,6 +95,10 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
     },
+  });
+  mainWindow = win;
+  win.on("closed", () => {
+    if (mainWindow === win) mainWindow = null;
   });
 
   const devUrl = process.env.VITE_DEV_SERVER_URL || "http://127.0.0.1:5173";

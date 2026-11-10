@@ -16,6 +16,14 @@ function pathExists(p: string): boolean {
   }
 }
 
+function hasComparableText(summary: Record<string, unknown>): boolean {
+  return (
+    ["pdf", "docx", "pptx"].includes(String(summary.kind)) &&
+    typeof summary.text === "string" &&
+    summary.text.trim().length >= 40
+  );
+}
+
 export function findVersionGroups(db: Db): VersionGroupView[] {
   // Clear prior ephemeral groups
   db.exec(`DELETE FROM version_members; DELETE FROM version_groups;`);
@@ -94,6 +102,9 @@ export function findVersionGroups(db: Db): VersionGroupView[] {
         ? (JSON.parse(row.summary_json) as Record<string, unknown>)
         : {};
     });
+
+    // ponytail: exact extracted-text matches only; fuzzy comparison needs better evidence.
+    if (summaries.some((summary) => !hasComparableText(summary))) continue;
 
     const mismatches =
       summaries.length >= 2

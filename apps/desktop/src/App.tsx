@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import {
   TYPE_ORDER,
+  type AnalysisStatus,
   type ActionView,
   type InventoryCounts,
   type OllamaStatus,
@@ -29,13 +30,6 @@ import {
 } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 
@@ -117,6 +111,9 @@ function reasonFor(proposal: ProposalView): string {
     return "Suggested from the file contents.";
   }
   const rule = evidence.rule;
+  if (evidence.evidenceQuality === "metadata") {
+    return "This suggestion is based on limited file evidence.";
+  }
   if (rule === "exact_sha256_duplicate") {
     return "This is an exact copy of a file you already organized.";
   }
@@ -151,12 +148,13 @@ export function App() {
   const [roots, setRootsState] = useState<RootsConfig | null>(null);
   const [ollama, setOllama] = useState<OllamaStatus | null>(null);
   const [inventory, setInventory] = useState<InventoryCounts | null>(null);
-  const [queueType, setQueueType] = useState<QueueType>("xlsx");
+  const [analysisStatus, setAnalysisStatus] = useState<AnalysisStatus | null>(null);
   const [proposals, setProposals] = useState<ProposalView[]>([]);
   const [actions, setActions] = useState<ActionView[]>([]);
   const [versions, setVersions] = useState<VersionGroupView[]>([]);
   const [reviewIndex, setReviewIndex] = useState(0);
   const [destEdit, setDestEdit] = useState("");
+  const [excludedProposalIds, setExcludedProposalIds] = useState<number[]>([]);
   const [batchTotal, setBatchTotal] = useState(0);
 
   const refresh = useCallback(async () => {
@@ -169,6 +167,7 @@ export function App() {
       }
       setInventory(await api<InventoryCounts>({ type: "getInventory" }));
       setProposals(await api<ProposalView[]>({ type: "listProposals" }));
+      setAnalysisStatus(await api<AnalysisStatus>({ type: "getAnalysisStatus" }));
       setActions(await api<ActionView[]>({ type: "listActions", limit: 20 }));
       setOllama(await api<OllamaStatus>({ type: "ollamaStatus" }));
     } catch (err) {
@@ -180,16 +179,72 @@ export function App() {
     void refresh();
   }, [refresh]);
 
+  useEffect(() => {
+    if (!window.untangle?.onEvent) return;
+    return window.untangle.onEvent((event) => {
+      if (event.type === "progress" && event.phase === "analysis") {
+        setNotice({
+          tone: "info",
+          title: "Organizing your library",
+          body: event.message ?? "Analyzing files in the background.",
+        });
+        void Promise.all([
+          api<AnalysisStatus>({ type: "getAnalysisStatus" }),
+          api<ProposalView[]>({ type: "listProposals" }),
+        ]).then(([status, next]) => {
+          setAnalysisStatus(status);
+          setProposals(next);
+        });
+      }
+      if (event.type === "done" && event.command === "analyzeLibrary") {
+        const status = event.result as AnalysisStatus;
+        setAnalysisStatus(status);
+        void api<ProposalView[]>({ type: "listProposals" }).then(setProposals);
+        const detail = `${status.proposed} suggestions ready; ${status.needsModel} need the local model; ${status.extractionFailed} files could not be read.`;
+        setNotice({ tone: "success", title: "Library analysis complete", body: detail });
+        toast.success("Library analysis complete", { description: detail, duration: 8000 });
+      }
+      if (event.type === "error") {
+        setNotice({ tone: "error", title: "Library analysis paused", body: event.message });
+        void api<AnalysisStatus>({ type: "getAnalysisStatus" }).then(setAnalysisStatus);
+      }
+    });
+  }, []);
+
+  useEffect(() => {
+    let closed = false;
+    void api<AnalysisStatus>({ type: "getAnalysisStatus" }).then((status) => {
+      if (closed || !status.active) return;
+      setAnalysisStatus(status);
+      setNotice({
+        tone: "info",
+        title: "Resuming library analysis",
+        body: "Continuing from the last saved chunk.",
+      });
+      void api({ type: "analyzeLibrary" });
+    }).catch(() => {});
+    return () => {
+      closed = true;
+    };
+  }, []);
+
   const foldersReady = !!(roots?.messyPath && roots?.untanglePath);
   const filesFound = (inventory?.total ?? 0) > 0;
   const hashedReady =
     filesFound && inventory !== null && inventory.hashed >= inventory.total;
   const hasProposals = proposals.length > 0;
   const hasMoves = actions.some((a) => !a.undone && a.kind === "move");
-  const currentProposal =
-    proposals.length > 0
-      ? proposals[Math.min(reviewIndex, proposals.length - 1)]
-      : null;
+  const hasHandledTopics = actions.some((a) => !a.undone && (a.kind === "move" || a.kind === "skip"));
+  const topicGroups = useMemo(() => {
+    const groups = new Map<string, ProposalView[]>();
+    for (const proposal of proposals) {
+      const folder = proposal.suggestedRelpath.replace(/\\/g, "/").split("/").slice(0, -1).join("/") || "Uncategorized";
+      groups.set(folder, [...(groups.get(folder) ?? []), proposal]);
+    }
+    return [...groups].map(([folder, files]) => ({ folder, files }));
+  }, [proposals]);
+  const currentGroup = topicGroups.length ? topicGroups[Math.min(reviewIndex, topicGroups.length - 1)] : null;
+  const includedCount = currentGroup?.files.filter((file) => !excludedProposalIds.includes(file.id)).length ?? 0;
   const reviewedCount = Math.max(0, batchTotal - proposals.length);
   const reviewProgress =
     batchTotal > 0 ? Math.round((reviewedCount / batchTotal) * 100) : 0;
@@ -204,12 +259,13 @@ export function App() {
   }, [proposals]);
 
   useEffect(() => {
-    if (!currentProposal) {
+    if (!currentGroup) {
       setDestEdit("");
       return;
     }
-    setDestEdit(currentProposal.suggestedRelpath);
-  }, [currentProposal]);
+    setDestEdit(currentGroup.folder);
+    setExcludedProposalIds([]);
+  }, [currentGroup?.folder]);
 
   useEffect(() => {
     if (proposals.length > batchTotal) setBatchTotal(proposals.length);
@@ -219,18 +275,18 @@ export function App() {
   const stepDone: Record<Step, boolean> = {
     1: foldersReady,
     2: hashedReady,
-    3: hasProposals || hasMoves,
-    4: hasMoves,
+    3: hasProposals || hasHandledTopics,
+    4: hasHandledTopics,
     5: false,
   };
 
   const nextUnlocked = useMemo(() => {
     if (!foldersReady) return 1 as Step;
     if (!hashedReady) return 2 as Step;
-    if (!hasProposals && !hasMoves) return 3 as Step;
+    if (!hasProposals && !hasHandledTopics) return 3 as Step;
     if (hasProposals) return 4 as Step;
     return 5 as Step;
-  }, [foldersReady, hashedReady, hasProposals, hasMoves]);
+  }, [foldersReady, hashedReady, hasProposals, hasHandledTopics]);
 
   const setStatusCard = (
     tone: "info" | "success" | "error",
@@ -242,7 +298,7 @@ export function App() {
 
   const run = async (
     label: string,
-    fn: () => Promise<void | string | { title: string; detail: string }>,
+    fn: () => Promise<void | string | { title: string; detail: string; background?: boolean }>,
     goTo?: Step,
   ) => {
     setError(null);
@@ -252,6 +308,11 @@ export function App() {
     try {
       const result = await fn();
       await refresh();
+      if (typeof result === "object" && result?.background) {
+        if (goTo) setStep(goTo);
+        toast.dismiss(toastId);
+        return;
+      }
       const title =
         typeof result === "object" && result
           ? result.title
@@ -375,6 +436,16 @@ export function App() {
                     <CardDescription className="whitespace-pre-wrap text-sm text-inherit opacity-80">
                       {notice.body}
                     </CardDescription>
+                    {analysisStatus?.active && analysisStatus.total > 0 && (
+                      <div className="space-y-1 pt-2">
+                        <Progress
+                          value={Math.round((analysisStatus.processed / analysisStatus.total) * 100)}
+                        />
+                        <p className="text-xs text-inherit opacity-80">
+                          {analysisStatus.processed} of {analysisStatus.total} files processed · {analysisStatus.remaining} remaining
+                        </p>
+                      </div>
+                    )}
                   </div>
                   {error && (
                     <Badge
@@ -405,7 +476,7 @@ export function App() {
                     <Button
                       type="button"
                       variant="outline"
-                      disabled={busy}
+                      disabled={busy || analysisStatus?.active}
                       onClick={() =>
                         void window.untangle
                           .pickDirectory()
@@ -426,7 +497,7 @@ export function App() {
                     <Button
                       type="button"
                       variant="outline"
-                      disabled={busy}
+                      disabled={busy || analysisStatus?.active}
                       onClick={() =>
                         void window.untangle
                           .pickDirectory()
@@ -446,7 +517,7 @@ export function App() {
                 <Button
                   type="button"
                   size="lg"
-                  disabled={busy || !messy || !untangle}
+                  disabled={busy || analysisStatus?.active || !messy || !untangle}
                   onClick={() =>
                     void run(
                       "Saving your folders…",
@@ -487,7 +558,7 @@ export function App() {
                 <Button
                   type="button"
                   size="lg"
-                  disabled={busy || !foldersReady}
+                  disabled={busy || analysisStatus?.active || !foldersReady}
                   onClick={() =>
                     void run(
                       "Refreshing messy folder… picking up any files you returned by hand.",
@@ -557,77 +628,46 @@ export function App() {
               <CardHeader>
                 <CardTitle>Prepare suggestions</CardTitle>
                 <CardDescription>
-                  Start with spreadsheets, then Word, then PDFs — one group at a
-                  time.
+                  Untangle reads supported files, then groups related material across file types.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
-                <div className="space-y-2">
-                  <p className="text-sm font-medium">
-                    Which files should we suggest places for?
-                  </p>
-                  <Select
-                    value={queueType}
-                    onValueChange={(v) => setQueueType(v as QueueType)}
-                    disabled={busy}
-                  >
-                    <SelectTrigger className="w-full max-w-sm">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {TYPE_ORDER.map((t) => (
-                        <SelectItem key={t} value={t}>
-                          {TYPE_LABELS[t]}
-                          {inventory ? ` (${inventory.byType[t]})` : ""}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
                 <Button
                   type="button"
                   size="lg"
-                  disabled={busy || !hashedReady}
+                  disabled={
+                    busy ||
+                    !hashedReady ||
+                    !!analysisStatus?.active ||
+                    (analysisStatus?.remaining === 0 && analysisStatus.extractionFailed === 0)
+                  }
                   onClick={() =>
                     void run(
-                      `Preparing suggestions for ${TYPE_LABELS[queueType]}…`,
+                      analysisStatus?.remaining ? "Resuming library analysis…" : "Analyzing your library…",
                       async () => {
-                        const extract = await api<{ extracted: number }>({
-                          type: "extractType",
-                          queueType,
+                        await api<{ started: boolean; active: boolean; resumed: boolean }>({
+                          type: "analyzeLibrary",
                         });
-                        const batch = await api<{
-                          proposed: number;
-                          needsModel: number;
-                        }>({ type: "proposeBatch", queueType });
                         const next = await api<ProposalView[]>({
                           type: "listProposals",
                         });
                         setBatchTotal(next.length);
                         setReviewIndex(0);
                         return {
-                          title:
-                            next.length > 0
-                              ? `${next.length} suggestion${next.length === 1 ? "" : "s"} ready`
-                              : `No suggestions for ${TYPE_LABELS[queueType]}`,
-                          detail: [
-                            `Type: ${TYPE_LABELS[queueType]}`,
-                            `Extracted/read: ${extract.extracted}`,
-                            `Newly proposed: ${batch.proposed}`,
-                            batch.needsModel > 0
-                              ? `Still need helper AI: ${batch.needsModel}`
-                              : null,
-                            `Waiting in review queue: ${next.length}`,
-                          ]
-                            .filter(Boolean)
-                            .join(" · "),
+                          title: "Analysis started",
+                          detail: "Suggestions will appear here as each chunk finishes. You can review them while the rest continues.",
+                          background: true,
                         };
                       },
                       4,
                     )
                   }
                 >
-                  Prepare suggestions
+                  {analysisStatus?.active
+                    ? "Analysis running…"
+                    : analysisStatus?.remaining
+                      ? "Resume library analysis"
+                      : "Analyze library and prepare suggestions"}
                 </Button>
                 {hasProposals && (
                   <p className="text-sm text-muted-foreground">
@@ -644,15 +684,14 @@ export function App() {
               <CardHeader className="shrink-0 space-y-3">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div className="space-y-1">
-                    <CardTitle>Review one file at a time</CardTitle>
+                    <CardTitle>Review one topic at a time</CardTitle>
                     <CardDescription>
-                      Check the new home. Change it if needed. Then approve —
-                      nothing moves until you say yes.
+                      Files with the same suggested topic are grouped together. Check “Skip this file” to leave any file in Messy.
                     </CardDescription>
                   </div>
                   {batchTotal > 0 && (
                     <Badge variant="secondary">
-                      {Math.min(reviewedCount + (currentProposal ? 1 : 0), batchTotal)}{" "}
+                      {reviewedCount}{" "}
                       of {batchTotal}
                     </Badge>
                   )}
@@ -661,14 +700,14 @@ export function App() {
                   <div className="space-y-1.5">
                     <Progress value={reviewProgress} />
                     <p className="text-xs text-muted-foreground">
-                      {reviewedCount} moved · {proposals.length} still waiting
+                      {reviewedCount} handled · {proposals.length} still waiting
                     </p>
                   </div>
                 )}
               </CardHeader>
 
               <CardContent className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-4">
-                {!currentProposal ? (
+                {!currentGroup ? (
                   <div className="space-y-4 rounded-xl border border-dashed border-border bg-muted/30 p-6 text-center">
                     <div className="mx-auto flex size-10 items-center justify-center rounded-full bg-primary/10 text-primary">
                       <CheckIcon className="size-5" />
@@ -676,7 +715,7 @@ export function App() {
                     <div className="space-y-1">
                       <p className="font-medium">You’re caught up</p>
                       <p className="text-sm text-muted-foreground">
-                        {hasMoves
+                        {hasHandledTopics
                           ? "All suggestions in this batch were handled."
                           : "No suggestions waiting yet."}
                       </p>
@@ -694,29 +733,40 @@ export function App() {
                   </div>
                 ) : (
                   <div className="space-y-5">
-                    <div className="space-y-3 rounded-xl border border-border p-4">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <p className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-                          This file
-                        </p>
-                        <Badge variant={confidenceLabel(currentProposal.confidence).tone}>
-                          {confidenceLabel(currentProposal.confidence).text}
-                        </Badge>
+                    <div className="space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <p className="text-xs font-medium tracking-wide text-muted-foreground uppercase">Topic</p>
+                          <p className="text-lg font-semibold">{currentGroup.folder}</p>
+                        </div>
+                        <Badge variant="secondary">{currentGroup.files.length} files</Badge>
                       </div>
-                      <p className="text-base font-semibold tracking-tight">
-                        {shortName(currentProposal.sourcePath)}
-                      </p>
-                      <div className="space-y-1">
-                        <p className="text-xs font-medium text-muted-foreground">
-                          Full path
-                        </p>
-                        <p className="break-all rounded-lg bg-muted/50 px-3 py-2 font-mono text-xs leading-relaxed">
-                          {currentProposal.sourcePath}
-                        </p>
+                      <div className="divide-y rounded-xl border">
+                        {currentGroup.files.map((file) => {
+                          const checked = excludedProposalIds.includes(file.id);
+                          return (
+                            <label key={file.id} className="flex cursor-pointer items-start gap-3 p-3">
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                disabled={busy}
+                                onChange={(event) => setExcludedProposalIds((ids) => event.target.checked ? [...ids, file.id] : ids.filter((id) => id !== file.id))}
+                                className="mt-1 size-4 accent-primary"
+                              />
+                              <span className="min-w-0 flex-1">
+                                <span className="flex flex-wrap items-center gap-2 font-medium">
+                                  {shortName(file.sourcePath)}
+                                  <Badge variant={confidenceLabel(file.confidence).tone}>{confidenceLabel(file.confidence).text}</Badge>
+                                </span>
+                                <span className="mt-1 block break-all font-mono text-xs text-muted-foreground">{file.sourcePath}</span>
+                                <span className="mt-1 block text-sm text-muted-foreground">{reasonFor(file)}</span>
+                                {checked && <span className="mt-1 block text-xs font-medium text-amber-700 dark:text-amber-400">Will stay in Messy</span>}
+                              </span>
+                              <span className="shrink-0 text-xs text-muted-foreground">Skip this file</span>
+                            </label>
+                          );
+                        })}
                       </div>
-                      <p className="text-sm text-muted-foreground">
-                        Why: {reasonFor(currentProposal)}
-                      </p>
                     </div>
 
                     <div className="flex justify-center text-muted-foreground">
@@ -728,14 +778,14 @@ export function App() {
                         New home (inside your clean folder)
                       </p>
                       <div className="space-y-2">
-                        <Label htmlFor="dest-path">Relative path under clean folder</Label>
+                        <Label htmlFor="dest-path">Topic folder under clean folder</Label>
                         <textarea
                           id="dest-path"
                           value={destEdit}
                           disabled={busy}
                           rows={3}
                           onChange={(e) => setDestEdit(e.target.value)}
-                          placeholder="Finance/Invoices/report.xlsx"
+                          placeholder="Finance/Invoices"
                           className="field-sizing-content min-h-16 w-full min-w-0 resize-y rounded-lg border border-input bg-transparent px-2.5 py-2 font-mono text-sm break-all leading-relaxed outline-none transition-colors focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:bg-input/50 disabled:opacity-50"
                         />
                         <div className="space-y-1">
@@ -759,39 +809,36 @@ export function App() {
                         disabled={busy || !destEdit.trim()}
                         onClick={() =>
                           void run(
-                            `Moving ${shortName(currentProposal.sourcePath)}…`,
+                            `Approving ${currentGroup.folder}…`,
                             async () => {
-                              const sourcePath = currentProposal.sourcePath;
-                              const destRel = destEdit.trim();
-                              const moved = await api<{
-                                beforePath: string;
-                                afterPath: string;
-                              }>({
-                                type: "approveMove",
-                                proposalId: currentProposal.id,
-                                destRelpath: destRel,
+                              const result = await api<{ moved: number; skipped: number; failed: Array<{ proposalId: number; error: string }> }>({
+                                type: "approveTopicGroup",
+                                topicFolder: currentGroup.folder,
+                                proposalIds: currentGroup.files.filter((file) => !excludedProposalIds.includes(file.id)).map((file) => file.id),
+                                skippedProposalIds: currentGroup.files.filter((file) => excludedProposalIds.includes(file.id)).map((file) => file.id),
+                                destinationFolder: destEdit.trim(),
                               });
                               return {
-                                title: `Moved ${shortName(moved.afterPath || sourcePath)}`,
-                                detail: `From:\n${moved.beforePath || sourcePath}\n\nTo:\n${moved.afterPath || joinDest(roots?.untanglePath ?? untangle, destRel)}`,
+                                title: `Topic handled: ${currentGroup.folder}`,
+                                detail: `${result.moved} moved · ${result.skipped} left in Messy${result.failed.length ? ` · ${result.failed.length} failed` : ""}${result.failed.length ? `\n\n${result.failed.map((failure) => failure.error).join("\n")}` : ""}`,
                               };
                             },
                           )
                         }
                       >
-                        Yes, move it here
+                        {includedCount ? `Approve topic · move ${includedCount} files` : `Skip all ${currentGroup.files.length} files`}
                       </Button>
                       <Button
                         type="button"
                         size="lg"
                         variant="outline"
-                        disabled={busy || proposals.length < 2}
+                        disabled={busy || topicGroups.length < 2}
                         onClick={() =>
-                          setReviewIndex((i) => (i + 1) % proposals.length)
+                          setReviewIndex((i) => (i + 1) % topicGroups.length)
                         }
                       >
                         <SkipForwardIcon data-icon="inline-start" />
-                        Skip for now
+                        Next topic
                       </Button>
                     </div>
                   </div>
@@ -800,7 +847,7 @@ export function App() {
 
               {(hasMoves || actions.some((a) => !a.undone)) && (
                 <CardFooter className="shrink-0 flex flex-wrap gap-2 border-t">
-                  {hasMoves && currentProposal && (
+                  {hasMoves && currentGroup && (
                     <Button type="button" variant="ghost" onClick={() => setStep(5)}>
                       Skip to duplicates
                     </Button>
@@ -815,14 +862,14 @@ export function App() {
                           type: "undoLast",
                         });
                         return {
-                          title: `Undid ${undone.kind}: ${shortName(undone.afterPath)}`,
-                          detail: `Restored to Messy:\n${undone.beforePath}\n\nWas at:\n${undone.afterPath}`,
+                          title: undone.kind === "skip" ? "Returned file to topic review" : `Undid ${undone.kind}: ${shortName(undone.afterPath)}`,
+                          detail: undone.kind === "skip" ? `File is available for review again:\n${undone.beforePath}` : `Restored to Messy:\n${undone.beforePath}\n\nWas at:\n${undone.afterPath}`,
                         };
                       })
                     }
                   >
                     <Undo2Icon data-icon="inline-start" />
-                    Undo last move
+                    Undo last action
                   </Button>
                 </CardFooter>
               )}
@@ -830,7 +877,7 @@ export function App() {
           )}
 
           {step === 5 && (
-            <Card>
+            <Card className="shrink-0">
               <CardHeader>
                 <CardTitle>Keep one copy</CardTitle>
                 <CardDescription>
