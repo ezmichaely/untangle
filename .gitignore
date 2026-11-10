@@ -1,0 +1,16 @@
+node_modules/
+dist/
+out/
+*.log
+.DS_Store
+# .superpowers/
+coverage/
+*.db
+*.db-journal
+.vite/
+release/
+apps/desktop/release/
+.env
+.env.*
+!.env.example
+graphify-out/

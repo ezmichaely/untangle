@@ -1,0 +1,54 @@
+---
+description: Always use Superpowers, agent skills, and ponytail for Untangle work
+alwaysApply: true
+---
+
+# Always-on agent workflow (Untangle)
+
+These are **mandatory** for every session in this repo until the human says otherwise.
+
+## 1. Ponytail — always on (full)
+
+- Smallest change that fully solves the ask. No extra UI, options, or abstractions.
+- Prefer automation over new manual steps (this product exists to reduce labor).
+- End substantive replies with one line: what you skipped / residual risk when useful.
+- Level: **full**. Switch only if the human says `ponytail lite|ultra|off`.
+
+## 2. Superpowers — always check first
+
+Before answering or editing:
+
+1. Invoke **using-superpowers** / relevant Superpowers skill when applicable.
+2. New behavior or features → **brainstorming** (approaches → short design → approval) before code, unless the human already approved a spec.
+3. Bugs → **systematic-debugging** before patches.
+4. Multi-step implementation after an approved plan → **writing-plans** / **executing-plans** or **subagent-driven-development**.
+5. Before claiming done → **verification-before-completion**.
+
+Announce: `Using [skill] to [purpose]` and follow the skill.
+
+## 3. Agent skills — pick the phase skill
+
+Use personal/project skills via the **using-agent-skills** map, for example:
+
+| Situation | Skill |
+|-----------|--------|
+| Unclear want | interview-me |
+| New feature / change | spec-driven-development → planning → incremental-implementation |
+| Tests | test-driven-development |
+| UI | frontend-ui-engineering |
+| Review | code-review-and-quality / code-simplification |
+| Codebase map | graphify (repo tooling only — not Messy organizer) |
+
+Process skills first, then implementation skills. Do not skip verification.
+
+## 4. Untangle product constraints
+
+- Local-first: Electron UI + Node worker + SQLite; Ollama optional analyst.
+- pnpm only (see package-manager rule).
+- Prefer expanding **automation** (e.g. batch topic analyst) over adding manual review screens.
+- Graphify is developer repo mapping, not the runtime organizer.
+---
+
+# Package manager reminder
+
+Still obey `.cursor/rules/package-manager.mdc` (pnpm only).

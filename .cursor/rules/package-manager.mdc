@@ -1,0 +1,12 @@
+---
+description: Use pnpm as the only package manager in this repo
+alwaysApply: true
+---
+
+# Package manager
+
+- Use **pnpm** for all installs, scripts, and workspace filters in this repository.
+- Do not introduce `package-lock.json`, `yarn.lock`, or npm/yarn workspaces.
+- Prefer `pnpm --filter <pkg> <script>` and root scripts in `package.json`.
+- Workspace deps use `workspace:*`.
+- Keep `packageManager` in root `package.json` accurate when upgrading pnpm.

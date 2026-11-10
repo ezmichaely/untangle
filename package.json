@@ -1,0 +1,25 @@
+{
+  "name": "untangle",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Local-first Messy→Untangle organizer",
+  "packageManager": "pnpm@10.33.2",
+  "scripts": {
+    "preinstall": "node scripts/ensure-pnpm.cjs",
+    "build": "pnpm --filter @untangle/shared build && pnpm --filter @untangle/worker build && pnpm --filter @untangle/desktop build",
+    "test": "pnpm --filter @untangle/shared test && pnpm --filter @untangle/worker test",
+    "dev": "pnpm --filter @untangle/desktop dev",
+    "typecheck": "pnpm --filter @untangle/shared typecheck && pnpm --filter @untangle/worker typecheck && pnpm --filter @untangle/desktop typecheck"
+  },
+  "engines": {
+    "node": ">=20",
+    "pnpm": ">=10"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "better-sqlite3",
+      "electron",
+      "esbuild"
+    ]
+  }
+}
