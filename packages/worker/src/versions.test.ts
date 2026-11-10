@@ -26,6 +26,31 @@ describe("summaryMismatches", () => {
 });
 
 describe("findVersionGroups + pickWinner", () => {
+  it("does not group files when their extracted text is empty", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "untangle-v-"));
+    tmpDirs.push(root);
+    const untangle = path.join(root, "Untangle");
+    const messy = path.join(root, "Messy");
+    fs.mkdirSync(untangle, { recursive: true });
+    fs.mkdirSync(messy, { recursive: true });
+
+    const db = openDb(path.join(root, "t.db"));
+    setRoots(db, { messyPath: messy, untanglePath: untangle });
+    for (const [name, sha] of [["pay.pdf", "pay"], ["certificate.pdf", "cert"]]) {
+      const file = path.join(untangle, name);
+      fs.writeFileSync(file, name);
+      const id = (db.prepare(
+        `INSERT INTO files(path, size, mtime_ms, ext, queue_type, sha256, fingerprint, status)
+         VALUES(?, 10, 1, '.pdf', 'pdf', ?, 'empty-text', 'moved') RETURNING id`,
+      ).get(file, sha) as { id: number }).id;
+      db.prepare(`INSERT INTO extractions(file_id, summary_json, fingerprint) VALUES(?, ?, 'empty-text')`)
+        .run(id, JSON.stringify({ kind: "pdf", text: "", length: 0 }));
+    }
+
+    expect(findVersionGroups(db).filter((g) => g.kind === "near")).toEqual([]);
+    db.close();
+  });
+
   it("clusters exact hashes and archives losers", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "untangle-v-"));
     tmpDirs.push(root);

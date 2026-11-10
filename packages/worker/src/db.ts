@@ -34,6 +34,13 @@ CREATE TABLE IF NOT EXISTS categories (
   label TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS topic_context (
+  category TEXT PRIMARY KEY,
+  description TEXT NOT NULL,
+  examples_json TEXT NOT NULL DEFAULT '[]',
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS proposals (
   id INTEGER PRIMARY KEY,
   file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,

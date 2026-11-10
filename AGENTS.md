@@ -6,6 +6,8 @@
 2. **Superpowers** — invoke relevant skills before acting (brainstorm → design → plan → implement → verify).
 3. **Agent skills** — use the phase skill from `using-agent-skills` (spec, TDD, debug, review, etc.).
 
+4. **Verification after code changes** — run `pnpm test` and `pnpm typecheck` after every code change, before reporting it complete. If a verification failure requires a fix, rerun both commands afterward. Do not mark implementation complete while either command is failing; if the environment blocks verification, report that clearly.
+
 Project rule mirror: `.cursor/rules/always-workflow.mdc` (`alwaysApply: true`).
 
 ## Stack (don’t reinvent)

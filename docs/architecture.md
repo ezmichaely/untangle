@@ -14,7 +14,8 @@ Electron main  ──spawns──►  Node worker (packages/worker)
                                 │
                                 ├─ SQLite index (userData/untangle.db)
                                 ├─ filesystem (Messy + Clean)
-                                └─ Ollama optional (127.0.0.1:11434)
+                                ├─ Ollama text analyst: qwen3:8b (127.0.0.1:11434)
+                                └─ Ollama image reader: qwen2.5vl:7b (127.0.0.1:11434)
 ```
 
 **Graphify is not in this runtime.** It was used once (and can be re-run) to map *this codebase* into `graphify-out/`. It does not open Messy and does not power duplicate detection.
@@ -27,8 +28,8 @@ Electron main  ──spawns──►  Node worker (packages/worker)
 |------|------|--------------|-------------------|
 | 1. Folders | First launch | Choose Messy + Clean roots; save to SQLite | Electron dialogs → worker `setRoots` |
 | 2. Refresh | After returns / first inventory | Walk Messy, upsert files, SHA-256, reclaim hand-returns | Node `fs` + `better-sqlite3` |
-| 3. Suggest | Per file type | Extract capped summaries → rules / Ollama proposals | ExcelJS, mammoth, pdf-parse, JSZip; Ollama HTTP |
-| 4. Review | One file at a time | Edit destination → approve move (collision-safe) | React UI + worker `approveAndMove` |
+| 3. Suggest | Library-wide | Resumable 20-file extraction chunks → bounded mixed-type Ollama analysis | ExcelJS, mammoth, pdf-parse, JSZip; Ollama HTTP |
+| 4. Review | One suggested topic folder at a time | Exclude individual files or approve the included group (collision-safe) | React UI + worker `approveTopicGroup` |
 | 5. Duplicates | After moves | Exact hash + near versions → pick winner, archive rest | worker `findVersionGroups` / `pickWinner` |
 
 Related Messy files are linked by **SHA-256 / fingerprints / version groups in SQLite**, not by graphify.
@@ -76,11 +77,11 @@ Electron loads Vite in dev; in prod it serves the built `dist/`. The **main** pr
 | DOCX | **mammoth** | Text extract |
 | PDF | **pdf-parse** | Text extract |
 | PPTX | **jszip** + XML | Slide text |
-| Classify (optional) | **Ollama** HTTP API | JSON category from capped summary (`qwen3:8b` default) |
+| Topic analysis | **Local Ollama** HTTP API | qwen2.5vl:7b describes images; qwen3:8b groups file evidence using bounded topic context |
 | Tests | **Vitest** | Unit tests |
 | Language | **TypeScript** → `tsc` → `dist/` | Built before Electron uses `cli.js` |
 
-Deterministic path: scan → hash → extract → rule proposals (exact twin / fingerprint) → move/undo. Ollama only fills gaps when rules don’t decide.
+Deterministic path: scan → hash → extract → rule proposals (exact twin / fingerprint) → bounded cross-type topic analysis → move/undo. Extractors and qwen2.5vl read local file content; qwen3 sees only capped summaries. Both Ollama calls use `127.0.0.1`; no file data is sent to a cloud service.
 
 ### Shared (`packages/shared`)
 
@@ -101,7 +102,7 @@ Stored under Electron **userData** (`untangle.db`), not in the git repo:
 - Roots (Messy path, Clean path)
 - File rows (path, size, mtime, ext, sha256, status)
 - Extractions (capped JSON + fingerprint)
-- Proposals, categories, action journal, version groups
+- Proposals, categories, bounded topic context, action journal, version groups
 
 File **bytes** stay on disk; the DB never stores full documents.
 
@@ -109,28 +110,23 @@ File **bytes** stay on disk; the DB never stores full documents.
 
 ## How topics are classified (image vs docx vs pptx)
 
-Untangle does **not** build a “topic graph” of Messy. It grows a **folder taxonomy** in SQLite (`categories`) and asks Ollama to place each file into that tree.
+Untangle does **not** build a “topic graph” of Messy. It maintains a **folder taxonomy** in SQLite (`categories`) plus a capped set of topic descriptions/examples in `topic_context`. The worker sends Ollama mixed-type batches of compact summaries so it can group related files across queue boundaries and later batches.
 
 | Signal | Cross-type? | What it means |
 |--------|-------------|----------------|
 | Same **SHA-256** as a moved file | Only identical bytes | Exact copy → same folder (any type if bytes match — rare across docx/pptx/image) |
 | Same **fingerprint** as a moved file | Same extractor family | Near-identical *extracted* content → same folder |
-| **Ollama** + existing category list | Yes (best-effort) | Model sees filename + capped summary + **current category names**, told to REUSE related topics; `polishPlacement` glues keyword-similar roots (e.g. “Election …”) |
+| **Ollama** + saved topic context | Yes (best-effort) | Model sees filename, type, capped summary, evidence quality, and a bounded set of category descriptions/examples; worker validates IDs and persists topic context |
 | You edit path in step 4 | Yes | Human override — source of truth |
 
-So: a docx, pptx, and image about “Election” **can** land under the same root **if**:
+Readable files across types can be grouped together in the same analysis batch, and later batches receive bounded saved topic context. For image files, qwen2.5vl:7b creates a short visual description that qwen3:8b uses alongside document summaries. Video and unsupported image files remain metadata-only. A fresh analysis clears stale topic examples, then builds context from the new proposals. Both models run locally; there is no cloud analysis path.
 
-1. One was already approved into e.g. `Election/…`, and  
-2. Later proposals see that category and Ollama / polish reuse it.
-
-They will **not** automatically cluster just because they’re “the same topic” in the abstract. V1 image/video summaries are thin (size/mtime/ext stubs — no OCR/captions), so images are the weakest link. Design explicitly deferred embeddings / vector “same topic” search.
-
-Queues are still **by type** (xlsx → docx → …): you prepare suggestions per type, but the **category tree is shared** across types once folders exist in the DB.
+The library analysis operation reads up to **20 files per extraction chunk**, then proposes from the extracted backlog in Ollama batches of up to **8 files**. It returns control immediately, emits progress and new suggestions as chunks finish, and resumes from SQLite state after restart. Extraction remains format-aware; grouping crosses file types. A failed extraction is recorded and retried on a later fresh run.
 
 ```text
 Messy files (any type)
-    → extract capped summary (rich for office; thin for media)
-    → propose into shared categories (+ Ollama reuse)
+    → extract capped summary (office text + local image description)
+    → bounded mixed-type Ollama grouping + saved topic context
     → you approve → category becomes an anchor for later files
 ```
 

@@ -5,9 +5,22 @@ export type FileStatus =
   | "extracted"
   | "proposed"
   | "moved"
+  | "skipped"
   | "archived"
   | "needs_model"
+  | "extract_failed"
   | "missing";
+
+export interface AnalysisStatus {
+  active: boolean;
+  total: number;
+  processed: number;
+  remaining: number;
+  extracted: number;
+  proposed: number;
+  needsModel: number;
+  extractionFailed: number;
+}
 
 export interface RootsConfig {
   messyPath: string;
@@ -67,8 +80,11 @@ export type WorkerCommand =
   | { type: "startHash" }
   | { type: "extractType"; queueType: QueueType }
   | { type: "proposeBatch"; queueType: QueueType; limit?: number }
+  | { type: "analyzeLibrary" }
+  | { type: "getAnalysisStatus" }
   | { type: "listProposals" }
   | { type: "approveMove"; proposalId: number; destRelpath?: string }
+  | { type: "approveTopicGroup"; topicFolder: string; proposalIds: number[]; skippedProposalIds: number[]; destinationFolder: string }
   | { type: "undoLast" }
   | { type: "listActions"; limit?: number }
   | { type: "findVersions" }

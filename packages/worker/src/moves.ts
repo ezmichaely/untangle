@@ -53,6 +53,85 @@ function releaseStalePathClaim(db: Db, absolutePath: string): void {
   );
 }
 
+function updateApprovedTopicContext(db: Db, fileId: number, category: string): void {
+  const row = db.prepare(
+    `SELECT f.path, f.queue_type, e.summary_json, p.evidence_json
+     FROM files f JOIN extractions e ON e.file_id = f.id
+     JOIN proposals p ON p.file_id = f.id WHERE f.id = ?`,
+  ).get(fileId) as {
+    path: string;
+    queue_type: string;
+    summary_json: string;
+    evidence_json: string;
+  } | undefined;
+  if (!row) return;
+
+  const contexts = db.prepare(`SELECT category, examples_json FROM topic_context`).all() as Array<{
+    category: string;
+    examples_json: string;
+  }>;
+  for (const context of contexts) {
+    try {
+      const examples = JSON.parse(context.examples_json) as Array<{ id?: number }>;
+      const filtered = examples.filter((example) => example.id !== fileId);
+      if (filtered.length !== examples.length) {
+        db.prepare(`UPDATE topic_context SET examples_json = ? WHERE category = ?`).run(
+          JSON.stringify(filtered),
+          context.category,
+        );
+      }
+    } catch {
+      // A malformed topic memory must not block an approved move.
+    }
+  }
+
+  let summary: Record<string, unknown> = {};
+  let rationale = "";
+  try {
+    summary = JSON.parse(row.summary_json) as Record<string, unknown>;
+    const evidence = JSON.parse(row.evidence_json) as Record<string, unknown>;
+    if (typeof evidence.rationale === "string") rationale = evidence.rationale.slice(0, 300);
+  } catch {
+    // Keep an empty summary and retain the approved category.
+  }
+  const serialized = JSON.stringify(summary);
+  const exampleSummary = serialized.length <= 700
+    ? serialized
+    : JSON.stringify({ kind: summary.kind ?? "unknown", excerpt: serialized.slice(0, 400) });
+  const current = db.prepare(
+    `SELECT description, examples_json FROM topic_context WHERE category = ?`,
+  ).get(category) as { description: string; examples_json: string } | undefined;
+  let examples: Array<{ id?: number; filename: string; queueType: string; summary: string }> = [];
+  try {
+    examples = current ? JSON.parse(current.examples_json) as typeof examples : [];
+  } catch {
+    examples = [];
+  }
+  examples = [
+    ...examples.filter((example) => example.id !== fileId),
+    {
+      id: fileId,
+      filename: path.basename(row.path),
+      queueType: row.queue_type,
+      summary: exampleSummary,
+    },
+  ].slice(-2);
+  db.prepare(
+    `INSERT INTO topic_context(category, description, examples_json, updated_at)
+     VALUES(?, ?, ?, ?)
+     ON CONFLICT(category) DO UPDATE SET
+       description = CASE WHEN excluded.description = '' THEN topic_context.description ELSE excluded.description END,
+       examples_json = excluded.examples_json,
+       updated_at = excluded.updated_at`,
+  ).run(category, rationale, JSON.stringify(examples), new Date().toISOString());
+  db.prepare(
+    `DELETE FROM topic_context WHERE category IN (
+       SELECT category FROM topic_context
+       ORDER BY updated_at DESC, category LIMIT -1 OFFSET 200
+     )`,
+  ).run();
+}
+
 export function moveFileSafe(src: string, dest: string): void {
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   if (pathExists(dest)) {
@@ -162,7 +241,81 @@ export function approveAndMove(
     );
   }
 
+  updateApprovedTopicContext(db, row.fileId, rel.replace(/\\/g, "/").split("/")[0]);
+
   return { beforePath: row.sourcePath, afterPath: dest };
+}
+
+export function approveTopicGroup(
+  db: Db,
+  topicFolder: string,
+  proposalIds: number[],
+  skippedProposalIds: number[],
+  destinationFolder: string,
+): { moved: number; skipped: number; failed: Array<{ proposalId: number; error: string }> } {
+  const normalizedTopic = topicFolder.replace(/\\/g, "/");
+  const destination = destinationFolder.replace(/\\/g, "/");
+  if (destination.startsWith("/")) throw new Error("destination must be a relative folder path");
+  const normalizedDestination = destination.replace(/\/+$/g, "");
+  const segments = normalizedDestination.split("/");
+  if (!normalizedTopic || normalizedTopic.startsWith("/") || normalizedTopic.split("/").some((segment) => !segment || segment === "." || segment === "..")) {
+    throw new Error("invalid topic folder");
+  }
+  if (!normalizedDestination || segments.some((segment) => !segment || segment === "." || segment === "..")) {
+    throw new Error("destination must be a relative folder path");
+  }
+  const allIds = [...proposalIds, ...skippedProposalIds];
+  if (!allIds.length || new Set(allIds).size !== allIds.length || allIds.some((id) => !Number.isInteger(id) || id <= 0)) {
+    throw new Error("topic group must contain unique proposal ids");
+  }
+  const rows = db.prepare(
+    `SELECT p.id, p.suggested_relpath AS suggested, f.path AS sourcePath,
+            f.sha256 AS sha256, f.status AS status
+     FROM proposals p JOIN files f ON f.id = p.file_id
+     WHERE f.status = 'proposed'
+     ORDER BY p.id`,
+  ).all() as Array<{
+    id: number; suggested: string; sourcePath: string; sha256: string | null; status: string;
+  }>;
+  const groupRows = rows.filter((row) => path.posix.dirname(row.suggested.replace(/\\/g, "/")) === normalizedTopic);
+  const actualIds = groupRows.map((row) => row.id).sort((a, b) => a - b);
+  const requestedIds = [...allIds].sort((a, b) => a - b);
+  if (JSON.stringify(actualIds) !== JSON.stringify(requestedIds)) {
+    throw new Error("topic group changed; refresh proposals before approving");
+  }
+  if (groupRows.some((row) => row.status !== "proposed")) {
+    throw new Error("all topic files must still be proposed");
+  }
+
+  let moved = 0;
+  let skipped = 0;
+  const failed: Array<{ proposalId: number; error: string }> = [];
+  for (const proposalId of proposalIds) {
+    const row = groupRows.find((item) => item.id === proposalId)!;
+    try {
+      const filename = path.posix.basename(row.suggested.replace(/\\/g, "/"));
+      approveAndMove(db, proposalId, `${normalizedDestination}/${filename}`);
+      moved++;
+    } catch (error) {
+      failed.push({ proposalId, error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  const skipOne = db.transaction((proposalId: number) => {
+    const row = groupRows.find((item) => item.id === proposalId)!;
+    const now = new Date().toISOString();
+    db.prepare(`INSERT INTO actions(kind, before_path, after_path, sha256, created_at, undone)
+      VALUES('skip', ?, ?, ?, ?, 0)`).run(row.sourcePath, row.sourcePath, row.sha256, now);
+    db.prepare(`UPDATE files SET status = 'skipped' WHERE path = ? AND status = 'proposed'`).run(row.sourcePath);
+  });
+  for (const proposalId of skippedProposalIds) {
+    try {
+      skipOne(proposalId);
+      skipped++;
+    } catch (error) {
+      failed.push({ proposalId, error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  return { moved, skipped, failed };
 }
 
 export function undoLastAction(db: Db): ActionView {
@@ -187,6 +340,11 @@ export function undoLastAction(db: Db): ActionView {
     | undefined;
 
   if (!row) throw new Error("no actions to undo");
+  if (row.kind === "skip") {
+    db.prepare(`UPDATE files SET status = 'proposed' WHERE path = ? AND status = 'skipped'`).run(row.beforePath);
+    db.prepare(`UPDATE actions SET undone = 1 WHERE id = ?`).run(row.id);
+    return { ...row, undone: true };
+  }
   if (row.kind !== "move" && row.kind !== "archive") {
     throw new Error(`cannot undo kind ${row.kind}`);
   }

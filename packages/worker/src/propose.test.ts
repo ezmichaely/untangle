@@ -4,7 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { openDb } from "./db.js";
 import { setRoots } from "./roots.js";
-import { proposeBatch, listProposals } from "./propose.js";
+import { proposeBatch, listProposals, proposeLibraryBatch } from "./propose.js";
 import type { ClassifyInput, ClassifyOutput } from "./ollama.js";
 
 const tmpDirs: string[] = [];
@@ -34,6 +34,67 @@ function seedExtracted(dbPath: string, filePath: string, sha: string, summary: o
 }
 
 describe("proposeBatch", () => {
+  it("uses local vision evidence when analyzing an image", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "untangle-image-topic-"));
+    tmpDirs.push(dir);
+    const file = path.join(dir, "dumbbells.png");
+    fs.writeFileSync(file, Buffer.from("local image bytes"));
+    const { db } = seedExtracted(path.join(dir, "t.db"), file, "image-sha", {
+      kind: "images", name: "dumbbells.png", size: 17, ext: ".png",
+    });
+    db.prepare(`UPDATE files SET queue_type = 'images'`).run();
+
+    let visionInput: { filename: string; imageBase64: string } | undefined;
+    let analystFile: { summary: Record<string, unknown>; evidenceQuality: string } | undefined;
+    const fake = {
+      async status() { return { ok: true, model: "test" }; },
+      async describeImage(input: { filename: string; imageBase64: string }) {
+        visionInput = input;
+        return "A pair of adjustable dumbbells on a gym floor.";
+      },
+      async analyzeBatch({ files }: { files: Array<{ summary: Record<string, unknown>; evidenceQuality: string }> }) {
+        analystFile = files[0];
+        return { groups: [{
+          category: "Fitness", fileIds: [1], confidence: 0.9,
+          rationale: "The image visibly shows dumbbells.", evidenceQuality: "content" as const,
+        }] };
+      },
+    };
+
+    await proposeLibraryBatch(db, 8, fake);
+    expect(visionInput).toEqual({ model: "qwen2.5vl:7b", filename: "dumbbells.png", imageBase64: Buffer.from("local image bytes").toString("base64") });
+    expect(analystFile?.summary.visualDescription).toBe("A pair of adjustable dumbbells on a gym floor.");
+    expect(analystFile?.evidenceQuality).toBe("content");
+    db.close();
+  });
+
+  it("marks a PDF with no extracted text as metadata evidence", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "untangle-empty-pdf-"));
+    tmpDirs.push(dir);
+    const file = path.join(dir, "dumbbells.pdf");
+    fs.writeFileSync(file, "x");
+    const { db } = seedExtracted(path.join(dir, "t.db"), file, "pdf-sha", {
+      kind: "pdf", pages: 1, text: "", length: 0,
+    });
+    db.prepare(`UPDATE files SET queue_type = 'pdf'`).run();
+
+    let quality: string | undefined;
+    const fake = {
+      async status() { return { ok: true, model: "test" }; },
+      async analyzeBatch({ files }: { files: Array<{ evidenceQuality: string }> }) {
+        quality = files[0]?.evidenceQuality;
+        return { groups: [{
+          category: "Fitness", fileIds: [1], confidence: 0.5,
+          rationale: "filename only", evidenceQuality: "metadata" as const,
+        }] };
+      },
+    };
+
+    await proposeLibraryBatch(db, 8, fake);
+    expect(quality).toBe("metadata");
+    db.close();
+  });
+
   it("marks needs_model when ollama fails", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "untangle-p-"));
     tmpDirs.push(dir);
